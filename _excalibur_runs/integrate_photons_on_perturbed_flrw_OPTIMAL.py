@@ -20,6 +20,7 @@ from scipy import interpolate
 import sys
 import os
 import time
+import platform
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -36,6 +37,7 @@ from excalibur.integration.integrator import Integrator # STANDARD
 from excalibur.core.constants import *
 from excalibur.core.cosmology import LCDM_Cosmology
 from excalibur.objects.spherical_mass import spherical_mass
+from excalibur.io.filename_utils import generate_trajectory_filename
 ##########################
 
 def main():
@@ -250,22 +252,59 @@ def main():
     # =============================================================================
     # 7. PARALLEL BACKWARD INTEGRATION - OPTIMAL
     # =============================================================================
-    print("\n7. Performing parallel backward ray tracing (OPTIMAL)...")
-    print(f"   >> Using Persistent Worker Pool with 4 workers")
-    print(f"   Expected speedup vs standard: ~60x")
+    print("\n7. Performing backward ray tracing...")
     
-    integration_start = time.time()
+    # Check if we're on Windows - multiprocessing has issues with Numba on Windows
+    is_windows = platform.system() == 'Windows'
+    use_parallel = not is_windows  # Disable parallel on Windows
     
-    # Use context manager for automatic cleanup
-    with PersistentPoolIntegrator(metric, dt=dt, n_workers=4) as integrator:
-        print(f"   Worker pool ready, integrating {len(photons)} photons...")
+    if is_windows:
+        print(f"   ⚠ Windows detected - using sequential mode (multiprocessing issues)")
+        print(f"   >> Sequential integration with Numba JIT")
+        print(f"   Expected speedup vs standard: ~15x")
+    
+    # Try parallel integration on non-Windows platforms, fallback to sequential otherwise
+    if use_parallel:
+        try:
+            print(f"   >> Attempting Persistent Worker Pool with 4 workers")
+            print(f"   Expected speedup vs standard: ~60x")
+            
+            integration_start = time.time()
+            
+            # Use context manager for automatic cleanup
+            with PersistentPoolIntegrator(metric, dt=dt, n_workers=4) as integrator:
+                print(f"   Worker pool ready, integrating {len(photons)} photons...")
+                
+                # Integrate all photons in parallel
+                integrator.integrate_photons(photons, n_steps)
+                
+                print(f"   [OK] All photons integrated successfully (PARALLEL)")
+            
+            integration_time = time.time() - integration_start
+            parallel_mode = True
+            
+        except (OSError, PermissionError, AttributeError) as e:
+            print(f"\n   ⚠ Parallel integration failed: {type(e).__name__}")
+            print(f"   >> Falling back to sequential integration")
+            use_parallel = False
+    
+    if not use_parallel:
+        integration_start = time.time()
         
-        # Integrate all photons in parallel
-        integrator.integrate_photons(photons, n_steps)
+        # Use sequential integrator with optimized metric
+        integrator = Integrator(metric, dt=dt)
         
-        print(f"   [OK] All photons integrated successfully")
+        print(f"   Integrating {len(photons)} photons sequentially...")
+        for i, photon in enumerate(photons):
+            integrator.integrate(photon, n_steps)
+            if (i + 1) % 10 == 0 or i == 0:
+                print(f"   Progress: {i+1}/{len(photons)} photons")
+        
+        print(f"   [OK] All photons integrated successfully (SEQUENTIAL + Numba JIT)")
+        
+        integration_time = time.time() - integration_start
+        parallel_mode = False
     
-    integration_time = time.time() - integration_start
     print(f"   Integration time: {integration_time:.2f}s")
     
     # =============================================================================
@@ -305,10 +344,18 @@ def main():
     # =============================================================================
     print("\n9. Saving trajectories...")
     
-    mass_x = center[0] / one_Mpc
-    mass_y = center[1] / one_Mpc
-    mass_z = center[2] / one_Mpc
-    output_filename = f"backward_raytracing_trajectories_OPTIMAL_mass_{mass_x:.0f}_{mass_y:.0f}_{mass_z:.0f}_Mpc.h5"
+    # Generate standardized filename with all geometric information
+    output_filename = generate_trajectory_filename(
+        mass_kg=M,
+        radius_m=radius,
+        mass_position_m=center,
+        observer_position_m=observer_position,
+        metric_type="perturbed_flrw",
+        version="OPTIMAL",
+        output_dir="_data"
+    )
+    
+    print(f"   Generated filename: {os.path.basename(output_filename)}")
     
     try:
         photons.save_all_histories(output_filename)
@@ -325,24 +372,26 @@ def main():
     # =============================================================================
     total_time = time.time() - start_time
     
+    mode_str = "Parallel (4 workers)" if parallel_mode else "Sequential (Numba JIT)"
+    speedup_str = "60x" if parallel_mode else "15x"
+    
     print("="*70)
-    print("BACKWARD RAY TRACING SUMMARY (OPTIMAL)")
+    print("BACKWARD RAY TRACING SUMMARY")
     print("="*70)
-    print(f"Optimizations:    Numba JIT (15x) + Persistent Pool 4 workers (4x)")
-    print(f"Expected speedup: 60x vs standard version")
+    print(f"Mode:             {mode_str}")
+    print(f"Expected speedup: {speedup_str} vs standard version")
     print(f"Cosmology:        LCDM (H0={H0}, Omega_m={Omega_m}, Omega_Lambda={Omega_lambda})")
     print(f"Grid:             {N}^3 cells, {grid_size/one_Mpc:.0f} Mpc box")
-    print(f"Mass:             {M/one_Msun:.1e} M_sun")
+    print(f"Mass:             {M/one_Msun:.1e} M_sun, R={radius/one_Mpc:.1f} Mpc")
     print(f"Observer:         eta={observer_eta}, r=[{observer_position[0]/one_Mpc:.1f}, {observer_position[1]/one_Mpc:.1f}, {observer_position[2]/one_Mpc:.1f}] Mpc")
     print(f"Photons:          {len(photons)} in {cone_angle*180/np.pi:.1f} deg cone")
     print(f"Integration:      {n_steps} steps, dt={dt:.2e}s (negative for backward)")
-    print(f"Workers:          4 parallel workers (persistent pool)")
     print(f"Integration time: {integration_time:.2f}s")
     print(f"Total time:       {total_time:.2f}s")
     print(f"Time per photon:  {integration_time/len(photons):.3f}s")
     print(f"Output:           {output_filename}")
     print("="*70)
-    print("[SUCCESS] Optimal backward ray tracing completed successfully!")
+    print(f"[SUCCESS] Backward ray tracing completed successfully!")
     print(f"  Performance: {len(photons)} photons in {integration_time:.2f}s")
     print(f"  (~{len(photons)/integration_time:.1f} photons/second)")
     

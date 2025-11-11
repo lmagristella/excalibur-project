@@ -43,7 +43,7 @@ def main():
     """Main function demonstrating all visualization tools."""
     
     # Input file
-    filename = "backward_raytracing_trajectories_OPTIMAL_mass_500_500_500_Mpc.h5"
+    filename = "_data/backward_raytracing_perturbed_flrw_OPTIMAL_M1.0e15_R5.0_mass500_500_500_obs0_0_0_Mpc.h5"
     
     if not os.path.exists(filename):
         print(f"Error: File not found: {filename}")
